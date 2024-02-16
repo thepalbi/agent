@@ -1,6 +1,7 @@
 package wal
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -112,6 +113,26 @@ func NewWriter(walCfg Config, logger log.Logger, reg prometheus.Registerer) (*Wr
 
 	wrt.start(walCfg.MaxSegmentAge)
 	return wrt, nil
+}
+
+// TODO: propagate context here downwards somewhere, since if the context is cancelled and this operation was blocked
+// we should exit promptly?
+func (wrt *Writer) Append(ctx context.Context, entry loki.Entry) (loki.Entry, error) {
+	if err := wrt.entryWriter.WriteEntry(entry, wrt.wal, wrt.log); err != nil {
+		level.Error(wrt.log).Log("msg", "failed to write entry", "err", err)
+		// if an error occurred while writing the wal, don't notify write subscribers
+		return entry, err
+	}
+
+	// emit metric with latest written timestamp, to be able to track delay from writer to watcher
+	wrt.lastWrittenTimestamp.WithLabelValues().Set(float64(entry.Timestamp.Unix()))
+
+	wrt.writeSubscribersLock.RLock()
+	for _, s := range wrt.writeSubscribers {
+		s.NotifyWrite()
+	}
+	wrt.writeSubscribersLock.RUnlock()
+	return entry, nil
 }
 
 func (wrt *Writer) start(maxSegmentAge time.Duration) {

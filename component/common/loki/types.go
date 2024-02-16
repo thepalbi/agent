@@ -74,6 +74,17 @@ type EntryHandler interface {
 	Stop()
 }
 
+func ImplementsAppender(i interface{}) bool {
+	_, ok := i.(Appender)
+	return ok
+}
+
+// Appender is an interface that follows the same pattern as Prometheus's Appender interface, that will allow
+// components to be plumbed together, via a blocking function call interface, rather than a channel.
+type Appender interface {
+	Append(ctx context.Context, entry Entry) (Entry, error)
+}
+
 // EntryMiddleware takes an EntryHandler and returns another one that will intercept and forward entries.
 // The newly created EntryHandler should be Stopped independently of the original one.
 type EntryMiddleware interface {
