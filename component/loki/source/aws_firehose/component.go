@@ -32,11 +32,11 @@ func init() {
 }
 
 type Arguments struct {
-	Server               *fnet.ServerConfig  `river:",squash"`
-	AccessKey            rivertypes.Secret   `river:"access_key,attr,optional"`
-	UseIncomingTimestamp bool                `river:"use_incoming_timestamp,attr,optional"`
-	ForwardTo            []loki.LogsReceiver `river:"forward_to,attr"`
-	RelabelRules         flow_relabel.Rules  `river:"relabel_rules,attr,optional"`
+	Server               *fnet.ServerConfig `river:",squash"`
+	AccessKey            rivertypes.Secret  `river:"access_key,attr,optional"`
+	UseIncomingTimestamp bool               `river:"use_incoming_timestamp,attr,optional"`
+	ForwardTo            []loki.Appender    `river:"forward_to,attr"`
+	RelabelRules         flow_relabel.Rules `river:"relabel_rules,attr,optional"`
 }
 
 // SetToDefault implements river.Defaulter.
@@ -50,11 +50,9 @@ func (a *Arguments) SetToDefault() {
 type Component struct {
 	// mut controls concurrent access to fanout
 	mut    sync.RWMutex
-	fanout []loki.LogsReceiver
+	fanout *loki.Fanout
 
-	// destination is the main destination where the TargetServer writes received log entries to
-	destination loki.LogsReceiver
-	rbs         []*relabel.Config
+	rbs []*relabel.Config
 
 	server *fnet.TargetServer
 
@@ -71,8 +69,7 @@ type Component struct {
 func New(o component.Options, args Arguments) (*Component, error) {
 	c := &Component{
 		opts:           o,
-		destination:    loki.NewLogsReceiver(),
-		fanout:         args.ForwardTo,
+		fanout:         loki.NewFanout(args.ForwardTo, o.ID, o.Registerer),
 		serverMetrics:  util.NewUncheckedCollector(nil),
 		handlerMetrics: internal.NewMetrics(o.Registerer),
 
@@ -96,18 +93,8 @@ func (c *Component) Run(ctx context.Context) error {
 		c.shutdownServer()
 	}()
 
-	for {
-		select {
-		case <-ctx.Done():
-			return nil
-		case entry := <-c.destination.Chan():
-			c.mut.RLock()
-			for _, receiver := range c.fanout {
-				receiver.Chan() <- entry
-			}
-			c.mut.RUnlock()
-		}
-	}
+	<-ctx.Done()
+	return nil
 }
 
 // Update updates the component with a new configuration, restarting the server if needed.
@@ -117,7 +104,7 @@ func (c *Component) Update(args component.Arguments) error {
 	defer c.mut.Unlock()
 
 	newArgs := args.(Arguments)
-	c.fanout = newArgs.ForwardTo
+	c.fanout.UpdateChildren(newArgs.ForwardTo)
 
 	var newRelabels []*relabel.Config = nil
 	// first condition to consider if the handler needs to be updated is if the UseIncomingTimestamp field
@@ -165,7 +152,7 @@ func (c *Component) Update(args component.Arguments) error {
 
 	if err = c.server.MountAndRun(func(router *mux.Router) {
 		// re-create handler when server is re-computed
-		handler := internal.NewHandler(c, c.logger, c.handlerMetrics, c.rbs, newArgs.UseIncomingTimestamp, string(newArgs.AccessKey))
+		handler := internal.NewHandler(c.fanout, c.logger, c.handlerMetrics, c.rbs, newArgs.UseIncomingTimestamp, string(newArgs.AccessKey))
 		router.Path("/awsfirehose/api/v1/push").Methods("POST").Handler(handler)
 	}); err != nil {
 		return err
@@ -173,11 +160,6 @@ func (c *Component) Update(args component.Arguments) error {
 
 	c.args = newArgs
 	return nil
-}
-
-// Send implements internal.Sender so that the component is able to receive logs decoded by the handler.
-func (c *Component) Send(ctx context.Context, entry loki.Entry) {
-	c.destination.Chan() <- entry
 }
 
 // shutdownServer will shut down the currently used server.

@@ -17,6 +17,7 @@ import (
 	"github.com/go-kit/log"
 	"github.com/grafana/agent/pkg/flow/logging/level"
 	"github.com/grafana/loki/pkg/logproto"
+	"github.com/hashicorp/go-multierror"
 	"github.com/prometheus/common/model"
 	"github.com/prometheus/prometheus/model/labels"
 	"github.com/prometheus/prometheus/model/relabel"
@@ -55,18 +56,18 @@ type Sender interface {
 type Handler struct {
 	metrics       *Metrics
 	logger        log.Logger
-	sender        Sender
+	app           loki.Appender
 	relabelRules  []*relabel.Config
 	useIncomingTs bool
 	accessKey     string
 }
 
 // NewHandler creates a new handler.
-func NewHandler(sender Sender, logger log.Logger, metrics *Metrics, rbs []*relabel.Config, useIncomingTs bool, accessKey string) *Handler {
+func NewHandler(appender loki.Appender, logger log.Logger, metrics *Metrics, rbs []*relabel.Config, useIncomingTs bool, accessKey string) *Handler {
 	return &Handler{
 		metrics:       metrics,
 		logger:        logger,
-		sender:        sender,
+		app:           appender,
 		relabelRules:  rbs,
 		useIncomingTs: useIncomingTs,
 		accessKey:     accessKey,
@@ -124,6 +125,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 
 	h.metrics.batchSize.WithLabelValues().Observe(float64(len(firehoseReq.Records)))
 
+	var multiErr error
 	for _, rec := range firehoseReq.Records {
 		// cleanup err since it might have failed in the previous iteration
 		err = nil
@@ -144,7 +146,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 
 		switch recordType {
 		case OriginDirectPUT:
-			h.sender.Send(req.Context(), loki.Entry{
+			_, err = h.app.Append(req.Context(), loki.Entry{
 				Labels: h.postProcessLabels(commonLabels.Labels()),
 				Entry: logproto.Entry{
 					Timestamp: ts,
@@ -156,9 +158,15 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		}
 		if err != nil {
 			h.metrics.errorsRecord.WithLabelValues(getReason(err)).Inc()
+			multierror.Append(multiErr, err)
 			level.Error(h.logger).Log("msg", "failed to handle cloudwatch record", "err", err.Error())
-			continue
 		}
+	}
+
+	if multiErr != nil {
+		// TODO: Improve the error messages
+		sendAPIResponse(w, firehoseReq.RequestID, "failed to process messages", http.StatusInternalServerError)
+		return
 	}
 
 	sendAPIResponse(w, firehoseReq.RequestID, "", http.StatusOK)
@@ -258,15 +266,19 @@ func (h *Handler) handleCloudwatchLogsRecord(ctx context.Context, data []byte, c
 	cwLogsLabels.Set("__aws_cw_matched_filters", strings.Join(cwRecord.SubscriptionFilters, ","))
 	cwLogsLabels.Set("__aws_cw_msg_type", cwRecord.MessageType)
 
+	var multiErr error = nil
 	for _, event := range cwRecord.LogEvents {
-		h.sender.Send(ctx, loki.Entry{
+		_, err := h.app.Append(ctx, loki.Entry{
 			Labels: h.postProcessLabels(cwLogsLabels.Labels()),
 			Entry: logproto.Entry{
 				Timestamp: timestamp,
 				Line:      event.Message,
 			},
 		})
+		if err != nil {
+			multierror.Append(multiErr, err)
+		}
 	}
 
-	return nil
+	return multiErr
 }

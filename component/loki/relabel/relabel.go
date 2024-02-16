@@ -30,7 +30,7 @@ func init() {
 // component.
 type Arguments struct {
 	// Where the relabeled metrics should be forwarded to.
-	ForwardTo []loki.LogsReceiver `river:"forward_to,attr"`
+	ForwardTo []loki.Appender `river:"forward_to,attr"`
 
 	// The relabelling rules to apply to each log entry before it's forwarded.
 	RelabelConfigs []*flow_relabel.Config `river:"rule,block,optional"`
@@ -52,7 +52,7 @@ func (a *Arguments) SetToDefault() {
 
 // Exports holds values which are exported by the loki.relabel component.
 type Exports struct {
-	Receiver loki.LogsReceiver  `river:"receiver,attr"`
+	Receiver loki.Appender      `river:"receiver,attr"`
 	Rules    flow_relabel.Rules `river:"rules,attr"`
 }
 
@@ -63,8 +63,8 @@ type Component struct {
 
 	mut      sync.RWMutex
 	rcs      []*relabel.Config
-	receiver loki.LogsReceiver
-	fanout   []loki.LogsReceiver
+	receiver *loki.Interceptor
+	fanout   *loki.Fanout
 
 	cache        *lru.Cache
 	maxCacheSize int
@@ -90,7 +90,23 @@ func New(o component.Options, args Arguments) (*Component, error) {
 
 	// Create and immediately export the receiver which remains the same for
 	// the component's lifetime.
-	c.receiver = loki.NewLogsReceiver()
+	c.fanout = loki.NewFanout(args.ForwardTo, o.ID, o.Registerer)
+	c.receiver = loki.NewInterceptor(
+		c.fanout,
+		loki.WithAppendHook(func(ctx context.Context, e loki.Entry, next loki.Appender) (loki.Entry, error) {
+			c.metrics.entriesProcessed.Inc()
+			lbls := c.relabel(e)
+			if len(lbls) == 0 {
+				level.Debug(c.opts.Logger).Log("msg", "dropping entry after relabeling", "labels", e.Labels.String())
+				return e, nil
+			}
+
+			c.metrics.entriesOutgoing.Inc()
+			e.Labels = lbls
+			next.Append(ctx, e)
+			return e, nil
+		}),
+	)
 	o.OnStateChange(Exports{Receiver: c.receiver, Rules: args.RelabelConfigs})
 
 	// Call to Update() to set the relabelling rules once at the start.
@@ -103,29 +119,8 @@ func New(o component.Options, args Arguments) (*Component, error) {
 
 // Run implements component.Component.
 func (c *Component) Run(ctx context.Context) error {
-	for {
-		select {
-		case <-ctx.Done():
-			return nil
-		case entry := <-c.receiver.Chan():
-			c.metrics.entriesProcessed.Inc()
-			lbls := c.relabel(entry)
-			if len(lbls) == 0 {
-				level.Debug(c.opts.Logger).Log("msg", "dropping entry after relabeling", "labels", entry.Labels.String())
-				continue
-			}
-
-			c.metrics.entriesOutgoing.Inc()
-			entry.Labels = lbls
-			for _, f := range c.fanout {
-				select {
-				case <-ctx.Done():
-					return nil
-				case f.Chan() <- entry:
-				}
-			}
-		}
-	}
+	<-ctx.Done()
+	return nil
 }
 
 // Update implements component.Component.
@@ -147,7 +142,7 @@ func (c *Component) Update(args component.Arguments) error {
 		}
 	}
 	c.rcs = newRCS
-	c.fanout = newArgs.ForwardTo
+	c.fanout.UpdateChildren(newArgs.ForwardTo)
 
 	c.opts.OnStateChange(Exports{Receiver: c.receiver, Rules: newArgs.RelabelConfigs})
 

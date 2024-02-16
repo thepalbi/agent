@@ -67,7 +67,7 @@ func (wa *WalArguments) SetToDefault() {
 // Exports holds the receiver that is used to send log entries to the
 // loki.write component.
 type Exports struct {
-	Receiver loki.LogsReceiver `river:"receiver,attr"`
+	Receiver loki.Appender `river:"receiver,attr"`
 }
 
 var (
@@ -81,7 +81,7 @@ type Component struct {
 
 	mut      sync.RWMutex
 	args     Arguments
-	receiver loki.LogsReceiver
+	receiver *appenderForwarder
 
 	// remote write components
 	clientManger *client.Manager
@@ -89,7 +89,7 @@ type Component struct {
 
 	// sink is the place where log entries received by this component should be written to. If WAL
 	// is enabled, this will be the WAL Writer, otherwise, the client manager
-	sink loki.EntryHandler
+	sink loki.Appender
 }
 
 // New creates a new loki.write component.
@@ -101,7 +101,9 @@ func New(o component.Options, args Arguments) (*Component, error) {
 
 	// Create and immediately export the receiver which remains the same for
 	// the component's lifetime.
-	c.receiver = loki.NewLogsReceiver()
+	c.receiver = &appenderForwarder{
+		mut: &c.mut,
+	}
 	o.OnStateChange(Exports{Receiver: c.receiver})
 
 	// Call to Update() to start readers and set receivers once at the start.
@@ -110,6 +112,19 @@ func New(o component.Options, args Arguments) (*Component, error) {
 	}
 
 	return c, nil
+}
+
+// maybe instead of using this the component should implement Appender, so it can lock and forward when acquired
+// should we be able to drop that lock? at least for the WAL writer?
+type appenderForwarder struct {
+	mut *sync.RWMutex
+	to  loki.Appender
+}
+
+func (a *appenderForwarder) Append(ctx context.Context, entry loki.Entry) (loki.Entry, error) {
+	a.mut.RLock()
+	defer a.mut.RUnlock()
+	return a.to.Append(ctx, entry)
 }
 
 // Run implements component.Component.
@@ -126,21 +141,8 @@ func (c *Component) Run(ctx context.Context) error {
 		}
 	}()
 
-	for {
-		select {
-		case <-ctx.Done():
-			return nil
-		case entry := <-c.receiver.Chan():
-			c.mut.RLock()
-			select {
-			case <-ctx.Done():
-				c.mut.RUnlock()
-				return nil
-			case c.sink.Chan() <- entry:
-			}
-			c.mut.RUnlock()
-		}
-	}
+	<-ctx.Done()
+	return nil
 }
 
 // Update implements component.Component.
@@ -193,6 +195,8 @@ func (c *Component) Update(args component.Arguments) error {
 			return fmt.Errorf("error creating wal writer: %w", err)
 		}
 		notifier = c.walWriter
+		// update the receiver to send to the new WAL writer
+		c.receiver.to = c.walWriter
 	}
 
 	c.clientManger, err = client.NewManager(c.metrics, c.opts.Logger, limit.Config{
@@ -206,7 +210,8 @@ func (c *Component) Update(args component.Arguments) error {
 	if walCfg.Enabled {
 		c.sink = c.walWriter
 	} else {
-		c.sink = c.clientManger
+		panic("WAL MUST BE ENABLED")
+		// c.sink = c.clientManger
 	}
 
 	return err
