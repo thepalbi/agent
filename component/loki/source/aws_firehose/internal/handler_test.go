@@ -44,12 +44,13 @@ func readTestData(t *testing.T, name string) string {
 	return string(f)
 }
 
-type receiver struct {
+type testAppender struct {
 	entries []loki.Entry
 }
 
-func (r *receiver) Send(ctx context.Context, entry loki.Entry) {
-	r.entries = append(r.entries, entry)
+func (t *testAppender) Append(ctx context.Context, entry loki.Entry) (loki.Entry, error) {
+	t.entries = append(t.entries, entry)
+	return entry, nil
 }
 
 type response struct {
@@ -311,10 +312,10 @@ func TestHandler(t *testing.T) {
 				w := log.NewSyncWriter(os.Stderr)
 				logger := log.NewLogfmtLogger(w)
 
-				testReceiver := &receiver{entries: make([]loki.Entry, 0)}
+				app := &testAppender{}
 				registry := prometheus.NewRegistry()
 				accessKey := ""
-				handler := NewHandler(testReceiver, logger, NewMetrics(registry), tc.Relabels, tc.UseIncomingTs, accessKey)
+				handler := NewHandler(app, logger, NewMetrics(registry), tc.Relabels, tc.UseIncomingTs, accessKey)
 
 				bs := bytes.NewBuffer(nil)
 				var bodyReader io.Reader = strings.NewReader(tc.Body)
@@ -349,7 +350,7 @@ func TestHandler(t *testing.T) {
 				handler.ServeHTTP(recorder, req)
 
 				// delegate assertions
-				tc.Assert(t, recorder, testReceiver.entries)
+				tc.Assert(t, recorder, app.entries)
 
 				if tc.AssertMetrics != nil {
 					gatheredMetrics, err := registry.Gather()
@@ -401,11 +402,11 @@ func TestHandlerAuth(t *testing.T) {
 			w := log.NewSyncWriter(os.Stderr)
 			logger := log.NewLogfmtLogger(w)
 
-			testReceiver := &receiver{entries: make([]loki.Entry, 0)}
+			app := &testAppender{}
 			registry := prometheus.NewRegistry()
 			relabeling := []*relabel.Config{}
 			incommingTs := false
-			handler := NewHandler(testReceiver, logger, NewMetrics(registry), relabeling, incommingTs, tc.AccessKey)
+			handler := NewHandler(app, logger, NewMetrics(registry), relabeling, incommingTs, tc.AccessKey)
 
 			body := strings.NewReader(readTestData(t, "testdata/direct_put.json"))
 			req, err := http.NewRequest("POST", "http://test", body)

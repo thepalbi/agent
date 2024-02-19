@@ -26,34 +26,16 @@ const singleRecordRequest = `{"requestId":"a1af4300-6c09-4916-ba8f-12f336176246"
 
 const expectedRecord = "{\"CHANGE\":-0.23,\"PRICE\":4.8,\"TICKER_SYMBOL\":\"NGC\",\"SECTOR\":\"HEALTHCARE\"}"
 
-// receiver implements a simple routine that receives loki.Entry from a channel and
-// stores them in a slice for later assertion.
-type receiver struct {
-	ch       chan loki.Entry
-	received []loki.Entry
-	mux      sync.RWMutex
+type testAppender struct {
+	mut     sync.RWMutex
+	entries []loki.Entry
 }
 
-// newReceiver creates a new receiver.
-func newReceiver(ch chan loki.Entry) *receiver {
-	return &receiver{
-		ch:       ch,
-		received: make([]loki.Entry, 0),
-	}
-}
-
-// run runs the main receiver routine, until the passed context is canceled.
-func (r *receiver) run(ctx context.Context) {
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case e := <-r.ch:
-			r.mux.Lock()
-			r.received = append(r.received, e)
-			r.mux.Unlock()
-		}
-	}
+func (t *testAppender) Append(ctx context.Context, entry loki.Entry) (loki.Entry, error) {
+	t.mut.Lock()
+	defer t.mut.Unlock()
+	t.entries = append(t.entries, entry)
+	return entry, nil
 }
 
 func TestComponent(t *testing.T) {
@@ -64,13 +46,7 @@ func TestComponent(t *testing.T) {
 		OnStateChange: func(e component.Exports) {},
 	}
 
-	ch1, ch2 := loki.NewLogsReceiver(), loki.NewLogsReceiver()
-	r1, r2 := newReceiver(ch1.Chan()), newReceiver(ch2.Chan())
-
-	// call cancelReceivers to terminate them
-	receiverContext, cancelReceivers := context.WithCancel(context.Background())
-	go r1.run(receiverContext)
-	go r2.run(receiverContext)
+	app1, app2 := &testAppender{}, &testAppender{}
 
 	args := Arguments{}
 
@@ -84,7 +60,7 @@ func TestComponent(t *testing.T) {
 		// assign random grpc port
 		GRPC: &fnet.GRPCConfig{ListenPort: 0},
 	}
-	args.ForwardTo = []loki.LogsReceiver{ch1, ch2}
+	args.ForwardTo = []loki.Appender{app1, app2}
 
 	// Create and run the component.
 	c, err := New(opts, args)
@@ -110,28 +86,26 @@ func TestComponent(t *testing.T) {
 	require.Equal(t, http.StatusOK, res.StatusCode)
 
 	require.Eventually(t, func() bool {
-		r1.mux.RLock()
-		r2.mux.RLock()
+		app1.mut.RLock()
+		app2.mut.RLock()
 		defer func() {
-			r1.mux.RUnlock()
-			r2.mux.RUnlock()
+			app1.mut.RUnlock()
+			app2.mut.RUnlock()
 		}()
-		return len(r1.received) == 1 && len(r2.received) == 1
+		return len(app1.entries) == 1 && len(app2.entries) == 1
 	}, time.Second*10, time.Second, "timed out waiting for receivers to get all messages")
 
-	cancelReceivers()
-
 	// r1 and r2 should have received one entry each
-	r1.mux.RLock()
-	r2.mux.RLock()
+	app1.mut.RLock()
+	app2.mut.RLock()
 	defer func() {
-		r1.mux.RUnlock()
-		r2.mux.RUnlock()
+		app1.mut.RUnlock()
+		app2.mut.RUnlock()
 	}()
-	require.Len(t, r1.received, 1)
-	require.Len(t, r2.received, 1)
-	require.JSONEq(t, expectedRecord, r1.received[0].Line)
-	require.JSONEq(t, expectedRecord, r2.received[0].Line)
+	require.Len(t, app1.entries, 1)
+	require.Len(t, app2.entries, 1)
+	require.JSONEq(t, expectedRecord, app1.entries[0].Line)
+	require.JSONEq(t, expectedRecord, app2.entries[0].Line)
 }
 
 func TestComponent_UpdateWithNewArguments(t *testing.T) {
@@ -142,14 +116,7 @@ func TestComponent_UpdateWithNewArguments(t *testing.T) {
 		OnStateChange: func(e component.Exports) {},
 	}
 
-	ch1, ch2 := loki.NewLogsReceiver(), loki.NewLogsReceiver()
-	r1, r2 := newReceiver(ch1.Chan()), newReceiver(ch2.Chan())
-
-	// call cancelReceivers to terminate them
-	receiverContext, cancelReceivers := context.WithCancel(context.Background())
-	go r1.run(receiverContext)
-	go r2.run(receiverContext)
-	defer cancelReceivers()
+	app1, app2 := &testAppender{}, &testAppender{}
 
 	args := Arguments{}
 
@@ -168,7 +135,7 @@ func TestComponent_UpdateWithNewArguments(t *testing.T) {
 		// assign random grpc port
 		GRPC: &fnet.GRPCConfig{ListenPort: 0},
 	}
-	args.ForwardTo = []loki.LogsReceiver{ch1}
+	args.ForwardTo = []loki.Appender{app1, app2}
 	args.RelabelRules = flow_relabel.Rules{
 		{
 			SourceLabels: []string{"__aws_firehose_source_arn"},
@@ -206,23 +173,23 @@ func TestComponent_UpdateWithNewArguments(t *testing.T) {
 	require.Equal(t, http.StatusOK, res.StatusCode)
 
 	require.Eventually(t, func() bool {
-		r1.mux.RLock()
-		defer r1.mux.RUnlock()
-		return len(r1.received) == 1
+		app1.mut.RLock()
+		defer app1.mut.RUnlock()
+		return len(app1.entries) == 1
 	}, time.Second*10, time.Second, "timed out waiting for receivers to get all messages")
 
-	r1.mux.RLock()
-	require.Len(t, r1.received, 1)
-	require.JSONEq(t, expectedRecord, r1.received[0].Line)
-	require.Equal(t, "testarn", string(r1.received[0].Labels["source_arn"]))
-	r1.mux.RUnlock()
+	app1.mut.RLock()
+	require.Len(t, app1.entries, 1)
+	require.JSONEq(t, expectedRecord, app1.entries[0].Line)
+	require.Equal(t, "testarn", string(app1.entries[0].Labels["source_arn"]))
+	app1.mut.RUnlock()
 
 	//
 	// create new config without relabels, and adding a new forward
 	//
 
 	args2 := Arguments{
-		ForwardTo: []loki.LogsReceiver{ch1, ch2},
+		ForwardTo: []loki.Appender{app1, app2},
 	}
 	args2.Server = &fnet.ServerConfig{
 		HTTP: &fnet.HTTPConfig{
@@ -234,8 +201,13 @@ func TestComponent_UpdateWithNewArguments(t *testing.T) {
 	require.NoError(t, c.Update(args2))
 	time.Sleep(200 * time.Millisecond)
 
-	// clear received entries
-	r1.received = nil
+	// clear entries entries
+	app1.mut.Lock()
+	app2.mut.Lock()
+	app1.entries = nil
+	app2.entries = nil
+	app1.mut.Unlock()
+	app2.mut.Unlock()
 
 	_, err = client.Do(req)
 	require.Error(t, err, "now that the port change, the first request should have errored")
@@ -249,25 +221,25 @@ func TestComponent_UpdateWithNewArguments(t *testing.T) {
 	require.Equal(t, http.StatusOK, res.StatusCode)
 
 	require.Eventually(t, func() bool {
-		r1.mux.RLock()
-		r2.mux.RLock()
+		app1.mut.RLock()
+		app2.mut.RLock()
 		defer func() {
-			r1.mux.RUnlock()
-			r2.mux.RUnlock()
+			app1.mut.RUnlock()
+			app2.mut.RUnlock()
 		}()
-		return len(r1.received) == 1 && len(r2.received) == 1
+		return len(app1.entries) == 1 && len(app2.entries) == 1
 	}, time.Second*10, time.Second, "timed out waiting for receivers to get all messages")
 
-	r1.mux.RLock()
-	r2.mux.RLock()
+	app1.mut.RLock()
+	app2.mut.RLock()
 	defer func() {
-		r1.mux.RUnlock()
-		r2.mux.RUnlock()
+		app1.mut.RUnlock()
+		app2.mut.RUnlock()
 	}()
-	require.Len(t, r1.received, 1)
-	require.Len(t, r2.received, 1)
-	require.JSONEq(t, expectedRecord, r1.received[0].Line)
-	require.NotContains(t, r1.received[0].Labels, model.LabelName("source_arn"), "expected received entry to not contain label")
-	require.JSONEq(t, expectedRecord, r2.received[0].Line)
-	require.NotContains(t, r2.received[0].Labels, model.LabelName("source_arn"), "expected received entry to not contain label")
+	require.Len(t, app1.entries, 1)
+	require.Len(t, app2.entries, 1)
+	require.JSONEq(t, expectedRecord, app1.entries[0].Line)
+	require.NotContains(t, app1.entries[0].Labels, model.LabelName("source_arn"), "expected entries entry to not contain label")
+	require.JSONEq(t, expectedRecord, app2.entries[0].Line)
+	require.NotContains(t, app2.entries[0].Labels, model.LabelName("source_arn"), "expected entries entry to not contain label")
 }
