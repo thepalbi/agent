@@ -103,8 +103,7 @@ func New(o component.Options, args Arguments) (*Component, error) {
 
 			c.metrics.entriesOutgoing.Inc()
 			e.Labels = lbls
-			next.Append(ctx, e)
-			return e, nil
+			return next.Append(ctx, e)
 		}),
 	)
 	o.OnStateChange(Exports{Receiver: c.receiver, Rules: args.RelabelConfigs})

@@ -1,6 +1,7 @@
 package stages
 
 import (
+	"context"
 	"fmt"
 	"sync"
 
@@ -112,6 +113,24 @@ func (p *Pipeline) Run(in chan Entry) chan Entry {
 // Name implements Stage
 func (p *Pipeline) Name() string {
 	return StageTypePipeline
+}
+
+func (p *Pipeline) Appender(next loki.Appender) loki.Appender {
+	interceptor := loki.NewInterceptor(next, loki.WithAppendHook(func(ctx context.Context, e loki.Entry, innerNext loki.Appender) (loki.Entry, error) {
+		initialExtracted := map[string]interface{}{}
+		for labelName, labelValue := range e.Labels {
+			initialExtracted[string(labelName)] = string(labelValue)
+		}
+		entry := Entry{
+			Extracted: initialExtracted,
+			Entry:     e,
+		}
+		for _, m := range p.stages {
+			m.Process(e.Labels, entry.Extracted, &e.Timestamp, &e.Line)
+		}
+		return innerNext.Append(ctx, entry.Entry)
+	}))
+	return interceptor
 }
 
 // Wrap implements EntryMiddleware

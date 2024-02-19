@@ -32,14 +32,14 @@ func init() {
 // Arguments holds values which are used to configure the loki.process
 // component.
 type Arguments struct {
-	ForwardTo []loki.LogsReceiver  `river:"forward_to,attr"`
+	ForwardTo []loki.Appender      `river:"forward_to,attr"`
 	Stages    []stages.StageConfig `river:"stage,enum,optional"`
 }
 
 // Exports exposes the receiver that can be used to send log entries to
 // loki.process.
 type Exports struct {
-	Receiver loki.LogsReceiver `river:"receiver,attr"`
+	Receiver loki.Appender `river:"receiver,attr"`
 }
 
 var (
@@ -50,15 +50,14 @@ var (
 type Component struct {
 	opts component.Options
 
-	mut          sync.RWMutex
-	receiver     loki.LogsReceiver
-	processIn    chan<- loki.Entry
-	processOut   chan loki.Entry
-	entryHandler loki.EntryHandler
-	stages       []stages.StageConfig
+	mut        sync.RWMutex
+	receiver   *appenderForwarder
+	processIn  chan<- loki.Entry
+	processOut chan loki.Entry
+	stages     []stages.StageConfig
 
 	fanoutMut sync.RWMutex
-	fanout    []loki.LogsReceiver
+	fanout    *loki.Fanout
 }
 
 // New creates a new loki.process component.
@@ -69,7 +68,10 @@ func New(o component.Options, args Arguments) (*Component, error) {
 
 	// Create and immediately export the receiver which remains the same for
 	// the component's lifetime.
-	c.receiver = loki.NewLogsReceiver()
+	c.receiver = &appenderForwarder{
+		mut: &c.mut,
+	}
+	c.fanout = loki.NewFanout(args.ForwardTo, o.ID, o.Registerer)
 	c.processOut = make(chan loki.Entry)
 	o.OnStateChange(Exports{Receiver: c.receiver})
 
@@ -81,22 +83,22 @@ func New(o component.Options, args Arguments) (*Component, error) {
 	return c, nil
 }
 
+// maybe instead of using this the component should implement Appender, so it can lock and forward when acquired
+// should we be able to drop that lock? at least for the WAL writer?
+type appenderForwarder struct {
+	mut *sync.RWMutex
+	to  loki.Appender
+}
+
+func (a *appenderForwarder) Append(ctx context.Context, entry loki.Entry) (loki.Entry, error) {
+	a.mut.RLock()
+	defer a.mut.RUnlock()
+	return a.to.Append(ctx, entry)
+}
+
 // Run implements component.Component.
 func (c *Component) Run(ctx context.Context) error {
-	defer func() {
-		c.mut.RLock()
-		if c.entryHandler != nil {
-			c.entryHandler.Stop()
-		}
-		close(c.processIn)
-		c.mut.RUnlock()
-	}()
-	wg := &sync.WaitGroup{}
-	wg.Add(2)
-	go c.handleIn(ctx, wg)
-	go c.handleOut(ctx, wg)
-
-	wg.Wait()
+	<-ctx.Done()
 	return nil
 }
 
@@ -106,7 +108,7 @@ func (c *Component) Update(args component.Arguments) error {
 
 	// Update c.fanout first in case anything else fails.
 	c.fanoutMut.Lock()
-	c.fanout = newArgs.ForwardTo
+	c.fanout.UpdateChildren(newArgs.ForwardTo)
 	c.fanoutMut.Unlock()
 
 	// Then update the pipeline itself.
@@ -117,65 +119,15 @@ func (c *Component) Update(args component.Arguments) error {
 	// first load. This will allow a component with no stages to function
 	// properly.
 	if stagesChanged(c.stages, newArgs.Stages) || c.stages == nil {
-		if c.entryHandler != nil {
-			c.entryHandler.Stop()
-		}
-
 		pipeline, err := stages.NewPipeline(c.opts.Logger, newArgs.Stages, &c.opts.ID, c.opts.Registerer)
 		if err != nil {
 			return err
 		}
-		c.entryHandler = loki.NewEntryHandler(c.processOut, func() {})
-		c.processIn = pipeline.Wrap(c.entryHandler).Chan()
+		c.receiver.to = pipeline.Appender(c.fanout)
 		c.stages = newArgs.Stages
 	}
 
 	return nil
-}
-
-func (c *Component) handleIn(ctx context.Context, wg *sync.WaitGroup) {
-	defer wg.Done()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case entry := <-c.receiver.Chan():
-			c.mut.RLock()
-			select {
-			case <-ctx.Done():
-				return
-			case c.processIn <- entry.Clone():
-				// no-op
-				// TODO(@tpaschalis) Instead of calling Clone() at the
-				// component's entrypoint here, we can try a copy-on-write
-				// approach instead, so that the copy only gets made on the
-				// first stage that needs to modify the entry's labels.
-			}
-			c.mut.RUnlock()
-		}
-	}
-}
-
-func (c *Component) handleOut(ctx context.Context, wg *sync.WaitGroup) {
-	defer wg.Done()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case entry := <-c.processOut:
-			c.fanoutMut.RLock()
-			fanout := c.fanout
-			c.fanoutMut.RUnlock()
-			for _, f := range fanout {
-				select {
-				case <-ctx.Done():
-					return
-				case f.Chan() <- entry:
-					// no-op
-				}
-			}
-		}
-	}
 }
 
 func stagesChanged(prev, next []stages.StageConfig) bool {

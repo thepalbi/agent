@@ -60,6 +60,7 @@ type Entry struct {
 type Stage interface {
 	Name() string
 	Run(chan Entry) chan Entry
+	Process(labels model.LabelSet, extracted map[string]interface{}, time *time.Time, entry *string)
 }
 
 func (entry *Entry) copy() *Entry {
