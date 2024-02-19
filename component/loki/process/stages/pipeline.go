@@ -1,14 +1,12 @@
 package stages
 
 import (
-	"context"
 	"fmt"
 	"sync"
 
 	"github.com/go-kit/log"
 	"github.com/grafana/agent/component/common/loki"
 	"github.com/prometheus/client_golang/prometheus"
-	"golang.org/x/time/rate"
 )
 
 // StageConfig defines a single stage in a processing pipeline.
@@ -16,36 +14,10 @@ import (
 // exactly one is set.
 type StageConfig struct {
 	//TODO(thampiotr): sync these with new stages
-	CRIConfig             *CRIConfig             `river:"cri,block,optional"`
-	DecolorizeConfig      *DecolorizeConfig      `river:"decolorize,block,optional"`
-	DockerConfig          *DockerConfig          `river:"docker,block,optional"`
-	DropConfig            *DropConfig            `river:"drop,block,optional"`
-	EventLogMessageConfig *EventLogMessageConfig `river:"eventlogmessage,block,optional"`
-	GeoIPConfig           *GeoIPConfig           `river:"geoip,block,optional"`
-	JSONConfig            *JSONConfig            `river:"json,block,optional"`
-	LabelAllowConfig      *LabelAllowConfig      `river:"label_keep,block,optional"`
-	LabelDropConfig       *LabelDropConfig       `river:"label_drop,block,optional"`
-	LabelsConfig          *LabelsConfig          `river:"labels,block,optional"`
-	LimitConfig           *LimitConfig           `river:"limit,block,optional"`
-	LogfmtConfig          *LogfmtConfig          `river:"logfmt,block,optional"`
-	MatchConfig           *MatchConfig           `river:"match,block,optional"`
-	MetricsConfig         *MetricsConfig         `river:"metrics,block,optional"`
-	MultilineConfig       *MultilineConfig       `river:"multiline,block,optional"`
-	OutputConfig          *OutputConfig          `river:"output,block,optional"`
-	PackConfig            *PackConfig            `river:"pack,block,optional"`
-	RegexConfig           *RegexConfig           `river:"regex,block,optional"`
-	ReplaceConfig         *ReplaceConfig         `river:"replace,block,optional"`
-	StaticLabelsConfig    *StaticLabelsConfig    `river:"static_labels,block,optional"`
-	StructuredMetadata    *LabelsConfig          `river:"structured_metadata,block,optional"`
-	SamplingConfig        *SamplingConfig        `river:"sampling,block,optional"`
-	TemplateConfig        *TemplateConfig        `river:"template,block,optional"`
-	TenantConfig          *TenantConfig          `river:"tenant,block,optional"`
-	TimestampConfig       *TimestampConfig       `river:"timestamp,block,optional"`
+	LabelDropConfig *LabelDropConfig `river:"label_drop,block,optional"`
+	MetricsConfig   *MetricsConfig   `river:"metrics,block,optional"`
+	SamplingConfig  *SamplingConfig  `river:"sampling,block,optional"`
 }
-
-var rateLimiter *rate.Limiter
-var rateLimiterDrop bool
-var rateLimiterDropReason = "global_rate_limiter_drop"
 
 // Pipeline pass down a log entry to each stage for mutation and/or label extraction.
 type Pipeline struct {
@@ -66,10 +38,9 @@ func NewPipeline(logger log.Logger, stages []StageConfig, jobName *string, regis
 		st = append(st, newStage)
 	}
 	return &Pipeline{
-		logger:    log.With(logger, "component", "pipeline"),
-		stages:    st,
-		jobName:   jobName,
-		dropCount: getDropCountMetric(registerer),
+		logger:  log.With(logger, "component", "pipeline"),
+		stages:  st,
+		jobName: jobName,
 	}, nil
 }
 
@@ -154,16 +125,6 @@ func (p *Pipeline) Wrap(next loki.EntryHandler) loki.EntryHandler {
 	go func() {
 		defer wg.Done()
 		for e := range pipelineOut {
-			if rateLimiter != nil {
-				if rateLimiterDrop {
-					if !rateLimiter.Allow() {
-						p.dropCount.WithLabelValues(rateLimiterDropReason).Inc()
-						continue
-					}
-				} else {
-					_ = rateLimiter.Wait(context.Background())
-				}
-			}
 			nextChan <- e.Entry
 		}
 	}()
@@ -186,9 +147,4 @@ func (p *Pipeline) Wrap(next loki.EntryHandler) loki.EntryHandler {
 // Size gets the current number of stages in the pipeline
 func (p *Pipeline) Size() int {
 	return len(p.stages)
-}
-
-func SetReadLineRateLimiter(rateVal float64, burstVal int, drop bool) {
-	rateLimiter = rate.NewLimiter(rate.Limit(rateVal), burstVal)
-	rateLimiterDrop = drop
 }
