@@ -38,7 +38,7 @@ const (
 // component.
 type Arguments struct {
 	Targets             []discovery.Target  `river:"targets,attr"`
-	ForwardTo           []loki.LogsReceiver `river:"forward_to,attr"`
+	ForwardTo           []loki.Appender     `river:"forward_to,attr"`
 	Encoding            string              `river:"encoding,attr,optional"`
 	DecompressionConfig DecompressionConfig `river:"decompression,block,optional"`
 	FileWatch           FileWatch           `river:"file_watch,block,optional"`
@@ -82,7 +82,7 @@ type Component struct {
 	mut       sync.RWMutex
 	args      Arguments
 	handler   loki.LogsReceiver
-	receivers []loki.LogsReceiver
+	receivers []loki.Appender
 	posFile   positions.Positions
 	readers   map[positions.Entry]reader
 }
@@ -144,7 +144,8 @@ func (c *Component) Run(ctx context.Context) error {
 		case entry := <-c.handler.Chan():
 			c.mut.RLock()
 			for _, receiver := range c.receivers {
-				receiver.Chan() <- entry
+				// TODO(pablo): add some error logging here?
+				_, _ = receiver.Append(ctx, entry)
 			}
 			c.mut.RUnlock()
 		}

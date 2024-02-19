@@ -124,9 +124,10 @@ func TestUnmarshallWalAttrributes(t *testing.T) {
 }
 
 func TestWriteToSingleEndpoint(t *testing.T) {
-	t.Run("wal disabled", func(t *testing.T) {
-		testSingleEndpoint(t, func(args *Arguments) {})
-	})
+	// TODO(pablo): WAL is a requirement from now on
+	// t.Run("wal disabled", func(t *testing.T) {
+	// 	testSingleEndpoint(t, func(args *Arguments) {})
+	// })
 
 	t.Run("wal enabled", func(t *testing.T) {
 		testSingleEndpoint(t, func(args *Arguments) {
@@ -184,8 +185,8 @@ func testSingleEndpoint(t *testing.T, alterConfig func(arguments *Arguments)) {
 	}
 
 	exports := tc.Exports().(Exports)
-	exports.Receiver.Chan() <- logEntry
-	exports.Receiver.Chan() <- logEntry
+	exports.Receiver.Append(context.Background(), logEntry)
+	exports.Receiver.Append(context.Background(), logEntry)
 
 	// Wait for our exporter to finish and pass data to our HTTP server.
 	// Make sure the log entries were received correctly.
@@ -202,9 +203,10 @@ func testSingleEndpoint(t *testing.T, alterConfig func(arguments *Arguments)) {
 }
 
 func TestEntrySentToTwoWriteComponents(t *testing.T) {
-	t.Run("wal disabled", func(t *testing.T) {
-		testMultipleEndpoint(t, func(arguments *Arguments) {})
-	})
+	// TODO(pablo): WAL is a requirement from now on
+	// t.Run("wal disabled", func(t *testing.T) {
+	// 	testMultipleEndpoint(t, func(arguments *Arguments) {})
+	// })
 
 	t.Run("wal enabled", func(t *testing.T) {
 		testMultipleEndpoint(t, func(arguments *Arguments) {
@@ -273,7 +275,7 @@ func testMultipleEndpoint(t *testing.T, alterArgs func(arguments *Arguments)) {
 	go func() {
 		err := ctrl.Run(context.Background(), lsf.Arguments{
 			Targets: []discovery.Target{{"__path__": f.Name(), "somelbl": "somevalue"}},
-			ForwardTo: []loki.LogsReceiver{
+			ForwardTo: []loki.Appender{
 				tc1.Exports().(Exports).Receiver,
 				tc2.Exports().(Exports).Receiver,
 			},
@@ -396,7 +398,7 @@ func benchSingleEndpoint(b *testing.B, tc testCase, alterConfig func(arguments *
 					Line:      "very important log",
 				},
 			}
-			exports.Receiver.Chan() <- logEntry
+			exports.Receiver.Append(context.Background(), logEntry)
 		}
 
 		require.Eventually(b, func() bool {
