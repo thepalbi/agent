@@ -127,6 +127,11 @@ func New(logger log.Logger, jobName *string, cfg StageConfig, registerer prometh
 		if err != nil {
 			return nil, err
 		}
+	case cfg.StaticLabelsConfig != nil:
+		s, err = newStaticLabelsStage(logger, *cfg.StaticLabelsConfig)
+		if err != nil {
+			return nil, err
+		}
 	default:
 		panic(fmt.Sprintf("unreachable; should have decoded into one of the StageConfig fields: %+v", cfg))
 	}

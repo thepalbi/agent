@@ -55,8 +55,10 @@ func TestLabelDrop(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			out := processEntries(st, newEntry(nil, test.inputLabels, "", time.Now()))[0]
-			assert.Equal(t, test.expectedLabels, out.Labels)
+			set := test.inputLabels.Clone()
+			now := time.Now()
+			st.Process(set, nil, &now, nil)
+			assert.Equal(t, test.expectedLabels, set)
 		})
 	}
 }

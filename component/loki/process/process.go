@@ -50,11 +50,9 @@ var (
 type Component struct {
 	opts component.Options
 
-	mut        sync.RWMutex
-	receiver   *appenderForwarder
-	processIn  chan<- loki.Entry
-	processOut chan loki.Entry
-	stages     []stages.StageConfig
+	mut      sync.RWMutex
+	receiver *appenderForwarder
+	stages   []stages.StageConfig
 
 	fanoutMut sync.RWMutex
 	fanout    *loki.Fanout
@@ -72,7 +70,6 @@ func New(o component.Options, args Arguments) (*Component, error) {
 		mut: &c.mut,
 	}
 	c.fanout = loki.NewFanout(args.ForwardTo, o.ID, o.Registerer)
-	c.processOut = make(chan loki.Entry)
 	o.OnStateChange(Exports{Receiver: c.receiver})
 
 	// Call to Update() to start readers and set receivers once at the start.

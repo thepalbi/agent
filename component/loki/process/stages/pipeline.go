@@ -8,6 +8,7 @@ import (
 	"github.com/go-kit/log"
 	"github.com/grafana/agent/component/common/loki"
 	"github.com/prometheus/client_golang/prometheus"
+	"golang.org/x/time/rate"
 )
 
 // StageConfig defines a single stage in a processing pipeline.
@@ -15,10 +16,14 @@ import (
 // exactly one is set.
 type StageConfig struct {
 	//TODO(thampiotr): sync these with new stages
-	LabelDropConfig *LabelDropConfig `river:"label_drop,block,optional"`
-	MetricsConfig   *MetricsConfig   `river:"metrics,block,optional"`
-	SamplingConfig  *SamplingConfig  `river:"sampling,block,optional"`
+	LabelDropConfig    *LabelDropConfig    `river:"label_drop,block,optional"`
+	MetricsConfig      *MetricsConfig      `river:"metrics,block,optional"`
+	StaticLabelsConfig *StaticLabelsConfig `river:"static_labels,block,optional"`
 }
+
+var rateLimiter *rate.Limiter
+var rateLimiterDrop bool
+var rateLimiterDropReason = "global_rate_limiter_drop"
 
 // Pipeline pass down a log entry to each stage for mutation and/or label extraction.
 type Pipeline struct {
@@ -117,18 +122,18 @@ func (p *Pipeline) Name() string {
 
 func (p *Pipeline) Appender(next loki.Appender) loki.Appender {
 	interceptor := loki.NewInterceptor(next, loki.WithAppendHook(func(ctx context.Context, e loki.Entry, innerNext loki.Appender) (loki.Entry, error) {
-		initialExtracted := map[string]interface{}{}
+		// copy entry labels to extracted map first
+		extracted := map[string]interface{}{}
 		for labelName, labelValue := range e.Labels {
-			initialExtracted[string(labelName)] = string(labelValue)
+			extracted[string(labelName)] = string(labelValue)
 		}
-		entry := Entry{
-			Extracted: initialExtracted,
-			Entry:     e,
-		}
+		// pe stands for processed entry. Cloning it since we don't want to mutate the original entry
+		pe := e.Clone()
+		// loop over configured stages, mutating entry
 		for _, m := range p.stages {
-			m.Process(e.Labels, entry.Extracted, &e.Timestamp, &e.Line)
+			m.Process(pe.Labels, extracted, &pe.Timestamp, &pe.Line)
 		}
-		return innerNext.Append(ctx, entry.Entry)
+		return innerNext.Append(ctx, pe)
 	}))
 	return interceptor
 }
@@ -144,6 +149,16 @@ func (p *Pipeline) Wrap(next loki.EntryHandler) loki.EntryHandler {
 	go func() {
 		defer wg.Done()
 		for e := range pipelineOut {
+			if rateLimiter != nil {
+				if rateLimiterDrop {
+					if !rateLimiter.Allow() {
+						p.dropCount.WithLabelValues(rateLimiterDropReason).Inc()
+						continue
+					}
+				} else {
+					_ = rateLimiter.Wait(context.Background())
+				}
+			}
 			nextChan <- e.Entry
 		}
 	}()
@@ -166,4 +181,9 @@ func (p *Pipeline) Wrap(next loki.EntryHandler) loki.EntryHandler {
 // Size gets the current number of stages in the pipeline
 func (p *Pipeline) Size() int {
 	return len(p.stages)
+}
+
+func SetReadLineRateLimiter(rateVal float64, burstVal int, drop bool) {
+	rateLimiter = rate.NewLimiter(rate.Limit(rateVal), burstVal)
+	rateLimiterDrop = drop
 }

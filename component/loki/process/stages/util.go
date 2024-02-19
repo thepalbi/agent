@@ -23,6 +23,8 @@ const (
 	ErrTimestampContainsYear = "timestamp '%s' is expected to not contain the year date component"
 )
 
+type parser func(string) (time.Time, error)
+
 // convertDateLayout converts pre-defined date format layout into date format
 func convertDateLayout(predef string, location *time.Location) parser {
 	switch predef {
