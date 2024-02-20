@@ -158,7 +158,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		}
 		if err != nil {
 			h.metrics.errorsRecord.WithLabelValues(getReason(err)).Inc()
-			multierror.Append(multiErr, err)
+			multiErr = multierror.Append(multiErr, err)
 			level.Error(h.logger).Log("msg", "failed to handle cloudwatch record", "err", err.Error())
 		}
 	}
@@ -268,15 +268,14 @@ func (h *Handler) handleCloudwatchLogsRecord(ctx context.Context, data []byte, c
 
 	var multiErr error = nil
 	for _, event := range cwRecord.LogEvents {
-		_, err := h.app.Append(ctx, loki.Entry{
+		if _, err := h.app.Append(ctx, loki.Entry{
 			Labels: h.postProcessLabels(cwLogsLabels.Labels()),
 			Entry: logproto.Entry{
 				Timestamp: timestamp,
 				Line:      event.Message,
 			},
-		})
-		if err != nil {
-			multierror.Append(multiErr, err)
+		}); err != nil {
+			multiErr = multierror.Append(multiErr, err)
 		}
 	}
 

@@ -53,8 +53,29 @@ func (t *testAppender) Append(ctx context.Context, entry loki.Entry) (loki.Entry
 	return entry, nil
 }
 
+func (t *testAppender) Get() []loki.Entry {
+	return t.entries
+}
+
 type response struct {
 	RequestID string `json:"requestId"`
+}
+
+type QueriableAppender interface {
+	loki.Appender
+	Get() []loki.Entry
+}
+
+type funcAppender struct {
+	appendFunc func(ctx context.Context, entry loki.Entry) (loki.Entry, error)
+}
+
+func (f *funcAppender) Append(ctx context.Context, entry loki.Entry) (loki.Entry, error) {
+	return f.appendFunc(ctx, entry)
+}
+
+func (f *funcAppender) Get() []loki.Entry {
+	return nil
 }
 
 func TestHandler(t *testing.T) {
@@ -70,6 +91,9 @@ func TestHandler(t *testing.T) {
 
 		// Relabels are the relabeling rules configured on Handler.
 		Relabels []*relabel.Config
+
+		// Appender is the appender to use in the test cases, if not the default, which just saves the logs
+		Appender QueriableAppender
 
 		// Assert is the main assertion function ran after the request is successful.
 		Assert func(t *testing.T, res *httptest.ResponseRecorder, entries []loki.Entry)
@@ -265,6 +289,24 @@ func TestHandler(t *testing.T) {
 				require.Equal(t, "test_lambdafunction_logfilter", string(entries[0].Labels["filters"]))
 			},
 		},
+		"appender fails to write logs": {
+			Body: readTestData(t, "testdata/cw_logs_with_only_data_messages.json"),
+			Appender: &funcAppender{
+				appendFunc: func(ctx context.Context, entry loki.Entry) (loki.Entry, error) {
+					return entry, fmt.Errorf("failed to write logs")
+				},
+			},
+			Assert: func(t *testing.T, res *httptest.ResponseRecorder, entries []loki.Entry) {
+				require.Equal(t, 500, res.Code)
+
+				fmt.Printf("response body: %s\n", res.Body.String())
+
+				r := response{}
+				require.NoError(t, json.Unmarshal(res.Body.Bytes(), &r))
+
+				require.Equal(t, "86208cf6-2bcc-47e6-9010-02ca9f44a025", r.RequestID)
+			},
+		},
 		"non json payload": {
 			Body: `{`,
 			Assert: func(t *testing.T, res *httptest.ResponseRecorder, entries []loki.Entry) {
@@ -312,7 +354,10 @@ func TestHandler(t *testing.T) {
 				w := log.NewSyncWriter(os.Stderr)
 				logger := log.NewLogfmtLogger(w)
 
-				app := &testAppender{}
+				var app QueriableAppender = &testAppender{}
+				if tc.Appender != nil {
+					app = tc.Appender
+				}
 				registry := prometheus.NewRegistry()
 				accessKey := ""
 				handler := NewHandler(app, logger, NewMetrics(registry), tc.Relabels, tc.UseIncomingTs, accessKey)
@@ -350,7 +395,7 @@ func TestHandler(t *testing.T) {
 				handler.ServeHTTP(recorder, req)
 
 				// delegate assertions
-				tc.Assert(t, recorder, app.entries)
+				tc.Assert(t, recorder, app.Get())
 
 				if tc.AssertMetrics != nil {
 					gatheredMetrics, err := registry.Gather()
